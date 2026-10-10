@@ -1,0 +1,21 @@
+require('dotenv').config();
+const express=require('express'),session=require('express-session'),helmet=require('helmet'),rateLimit=require('express-rate-limit'),bcrypt=require('bcryptjs'),fs=require('fs'),path=require('path'),crypto=require('crypto');
+const app=express(),PORT=Number(process.env.PORT||3000),DATA=path.join(__dirname,'data'),DB=path.join(DATA,'users.json'),PUBLIC=path.join(__dirname,'public');
+if(process.env.NODE_ENV==='production'&&!process.env.SESSION_SECRET)throw Error('SESSION_SECRET must be set in production.');
+fs.mkdirSync(DATA,{recursive:true});if(!fs.existsSync(DB))fs.writeFileSync(DB,'[]',{flag:'wx'});
+const users=()=>{try{const v=JSON.parse(fs.readFileSync(DB,'utf8'));return Array.isArray(v)?v:[]}catch{return []}};
+const save=v=>{const tmp=DB+'.tmp';fs.writeFileSync(tmp,JSON.stringify(v,null,2),{mode:0o600});fs.renameSync(tmp,DB)};
+const safe=u=>({id:u.id,name:u.name,email:u.email,createdAt:u.createdAt});
+const emailPattern=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const auth=(req,res,next)=>{if(!req.session.uid)return res.status(401).json({error:'Please log in to continue.'});const u=users().find(x=>x.id===req.session.uid);if(!u)return res.status(401).json({error:'Session expired. Please log in again.'});req.user=u;next()};
+app.disable('x-powered-by');app.use(helmet());app.use(express.json({limit:'20kb'}));app.use(express.urlencoded({extended:false,limit:'20kb'}));
+app.use(session({name:'shobhitweb.sid',secret:process.env.SESSION_SECRET||'local-only-change-me',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:86400000}}));
+const limiter=rateLimit({windowMs:900000,limit:10,standardHeaders:'draft-7',legacyHeaders:false,message:{error:'Too many attempts. Please wait and try again.'}});
+app.get('/api/health',(req,res)=>res.json({ok:true}));
+app.post('/api/auth/join',limiter,async(req,res)=>{const name=String(req.body.name||'').trim(),email=String(req.body.email||'').trim().toLowerCase(),password=String(req.body.password||'');if(name.length<2||name.length>60)return res.status(400).json({error:'Name must be 2–60 characters.'});if(email.length>254||!emailPattern.test(email))return res.status(400).json({error:'Enter a valid email address.'});if(password.length<8||password.length>128)return res.status(400).json({error:'Password must be 8–128 characters.'});const list=users();if(list.some(u=>u.email===email))return res.status(409).json({error:'An account with this email already exists.'});const u={id:crypto.randomUUID(),name,email,passwordHash:await bcrypt.hash(password,12),createdAt:new Date().toISOString()};list.push(u);save(list);req.session.uid=u.id;res.status(201).json({user:safe(u)});});
+app.post('/api/auth/login',limiter,async(req,res)=>{const email=String(req.body.email||'').trim().toLowerCase(),password=String(req.body.password||''),u=users().find(x=>x.email===email);if(!u||!(await bcrypt.compare(password,u.passwordHash)))return res.status(401).json({error:'Email or password is incorrect.'});req.session.uid=u.id;res.json({user:safe(u)});});
+app.get('/api/auth/me',auth,(req,res)=>res.json({user:safe(req.user)}));
+app.post('/api/auth/logout',(req,res)=>req.session.destroy(err=>{if(err)return res.status(500).json({error:'Could not log out.'});res.clearCookie('shobhitweb.sid',{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production'});res.json({ok:true})}));
+app.post('/api/contact',limiter,(req,res)=>{const n=String(req.body.name||'').trim(),e=String(req.body.email||'').trim(),m=String(req.body.message||'').trim();if(n.length<2||n.length>60||e.length>254||!emailPattern.test(e)||m.length<10||m.length>2000)return res.status(400).json({error:'Check your name, email, and message (10–2000 characters).'});res.json({message:'Form validated. Email delivery is not configured yet.'})});
+// Only public assets are served. server.js, .env, and data stay outside the public directory.
+app.use(express.static(PUBLIC));app.get('*',(req,res)=>res.sendFile(path.join(PUBLIC,'index.html')));app.listen(PORT,()=>console.log(`Shobhit Web running on http://localhost:${PORT}`));
